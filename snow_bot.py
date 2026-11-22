@@ -272,6 +272,7 @@ class SheetStore:
     def load_enemies(self): return parse_enemies(self._wb())
     def load_items(self): return parse_items(self._wb())
     def set_hp(self, uid, hp): return self._post({"action": "hp", "uid": str(uid), "hp": hp})
+    def hp_delta(self, uid, delta): return self._post({"action": "hp_delta", "uid": str(uid), "delta": delta})
     def infect(self, uid, add, note): return self._post({"action": "infect", "uid": str(uid), "add": add, "note": note})
     def heal(self, target_uid, owner_uid, item):
         return self._post({"action": "heal", "uid": str(target_uid), "owner": str(owner_uid), "item": item})
@@ -303,6 +304,14 @@ class LocalStore:
             mx = _int(ws.cell(r, 4).value, DEFAULT_RUNNER_HP) or DEFAULT_RUNNER_HP
             ws.cell(r, 3).value = max(0, min(mx, hp)); wb.save(EXCEL_PATH)
             return {"ok": True}
+
+    def hp_delta(self, uid, delta):
+        with self.lock:
+            wb = self._wb(False); ws = wb["러너"]; r = self._runner_row(ws, uid)
+            mx = _int(ws.cell(r, 4).value, DEFAULT_RUNNER_HP) or DEFAULT_RUNNER_HP
+            hp = max(0, min(mx, _int(ws.cell(r, 3).value, mx) + delta))
+            ws.cell(r, 3).value = hp; wb.save(EXCEL_PATH)
+            return {"ok": True, "hp": hp, "max": mx, "name": ws.cell(r, 1).value}
 
     def infect(self, uid, add, note):
         with self.lock:
@@ -698,6 +707,44 @@ async def do_investigate_group(i, group):
     await private(i, "✅ 처리했습니다." + (f" 실패: {', '.join(bad)}" if bad else ""))
 
 
+async def do_hp_adjust(i, delta, member, group, reason):
+    """총괄: 조사 중 피해/회복 등을 시트 체력에 바로 더하거나 뺌 (전투 중인 러너는 전투 체력도 같이 바뀜)"""
+    await i.response.defer(ephemeral=True)
+    if (member is None) == (group is None):
+        return await private(i, "`대상자` 와 `조` 중 하나만 입력하세요.")
+    if delta == 0:
+        return await private(i, "증감 값이 0 입니다.")
+    if member is not None:
+        targets = [(member.id, None)]
+    else:
+        rows = await asyncio.to_thread(store.load_runners)
+        targets = [(x["uid"], x["name"]) for x in rows if x["group"] == group and x["uid"]]
+        if not targets:
+            return await private(i, f"{group}조 러너가 없습니다.")
+    lines, bad = [], []
+    for uid, nm in targets:
+        b = next((x for x in battles.values() if uid in x.runners), None)
+        try:
+            if b:                                      # 전투 중: 전투 체력과 시트를 같이 맞춤
+                async with b.lock:
+                    r = b.runners[uid]
+                    r.hp = max(0, min(r.max_hp, r.hp + delta))
+                    await asyncio.to_thread(store.set_hp, uid, r.hp)
+                    res = {"hp": r.hp, "max": r.max_hp, "name": r.name}
+            else:
+                res = await asyncio.to_thread(store.hp_delta, uid, delta)
+        except StoreError as ex:
+            bad.append(f"{nm or uid}({ex})"); continue
+        lines.append(f"**{res.get('name') or nm}**  {hp_line(res['hp'], res['max'])}" + ("  💀 쓰러졌다" if res["hp"] <= 0 else ""))
+    if lines:
+        sign = f"+{delta}" if delta > 0 else str(delta)
+        em = discord.Embed(title=("🍖 체력 회복" if delta > 0 else "🩸 체력 감소") + f" ({sign})",
+                           description=(f"*{reason}*\n\n" if reason else "") + "\n".join(lines),
+                           color=COLOR_ATK if delta > 0 else COLOR_ENEMY)
+        await i.channel.send(embed=em)
+    await private(i, "✅ 반영했습니다." + (f" 실패: {', '.join(bad)}" if bad else ""))
+
+
 async def do_start(i, group, first, enemy_count, hp, dice, picked):
     await i.response.defer(ephemeral=True)
     if i.channel_id in battles and not battles[i.channel_id].ended:
@@ -903,6 +950,13 @@ async def cmd_start(i: discord.Interaction, 조: int, 선공: str = "러너", �
                     러너1: discord.Member = None, 러너2: discord.Member = None,
                     러너3: discord.Member = None, 러너4: discord.Member = None):
     await do_start(i, 조, 선공, 백귀수, 체력, 공격, [m for m in (러너1, 러너2, 러너3, 러너4) if m])
+
+
+@tree.command(name="체력조정", description="[총괄] 러너의 체력을 더하거나 뺍니다 (조사 중 피해 등). 시트에 바로 반영")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(증감="줄이려면 -10, 늘리려면 10 처럼 입력", 대상자="한 명에게 (조 대신)", 조="그 조 전체에게 (대상자 대신)", 사유="표시할 지문 (선택)")
+async def cmd_hp_adjust(i: discord.Interaction, 증감: int, 대상자: discord.Member = None, 조: int = None, 사유: str = None):
+    await do_hp_adjust(i, 증감, 대상자, 조, 사유)
 
 
 @tree.command(name="강제진행", description="[총괄] 아직 행동하지 않은 러너를 건너뛰고 백귀 차례로 넘깁니다")
