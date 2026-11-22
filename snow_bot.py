@@ -54,6 +54,7 @@ DEFAULT_RUNNER_HP = 100      # 시트에 최대체력이 비어 있을 때
 DEFAULT_ENEMY_HP = 50        # 백귀 기본 체력
 DEFAULT_ENEMY_DICE = 20      # 백귀 기본 공격 다이스
 FLEE_DIE, FLEE_NEED = 10, 7  # 도주: D10, 7 이상 성공
+JUDGE_DIE, JUDGE_NEED = 10, 7  # /판정: D10, 7 이상 성공
 MAX_RUNNERS = 4              # 한 전투에 참가할 수 있는 러너 수
 PHASE_DELAY = 5              # 마지막 러너가 행동한 뒤 백귀가 반격하기까지 기다리는 시간(초)
 
@@ -669,6 +670,21 @@ async def do_heal(i, item, target_member):
     await private(i, "✅ 사용했습니다." + ("" if left is None else f" (남은 횟수 {left})"))
 
 
+async def do_judge(i, note):
+    await i.response.defer(ephemeral=True)
+    roll = d(JUDGE_DIE)
+    ok = roll >= JUDGE_NEED
+    name = i.user.display_name
+    me = next((x for x in _cache["runners"] if x["uid"] == i.user.id), None)
+    if me:
+        name = me["name"]
+    em = discord.Embed(title=f"🎲 {name}의 판정", color=COLOR_ATK if ok else COLOR_ENEMY,
+                       description=(f"*{note}*\n\n" if note else "") + ("**✅ 성공**" if ok else "**❌ 실패**"))
+    em.add_field(name="판정 다이스", value=f"D{JUDGE_DIE} → **{roll}**  (≥{JUDGE_NEED} 성공)", inline=False)
+    await i.channel.send(embed=em)
+    await private(i, "✅ 판정했습니다.")
+
+
 async def do_info(i):
     await i.response.defer(ephemeral=True)
     try:
@@ -944,6 +960,12 @@ async def cmd_heal(i: discord.Interaction, 아이템: str, 대상자: discord.Me
 @cmd_heal.autocomplete("아이템")
 async def ac_heal_item(i: discord.Interaction, current: str):
     return await item_choices(i, current, "회복")
+
+
+@tree.command(name="판정", description="D10 판정을 합니다 (7 이상 성공)")
+@app_commands.describe(지문="무엇을 판정하는지 적어 주세요 (선택)")
+async def cmd_judge(i: discord.Interaction, 지문: str = None):
+    await do_judge(i, 지문)
 
 
 @tree.command(name="내정보", description="내 체력과 아이템을 확인합니다 (나에게만 보임)")
