@@ -29,6 +29,7 @@ import io
 import json
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -158,8 +159,12 @@ def pending_names(b):
 
 
 def find_enemy(b, text):
-    """이름 그대로, 번호(1,2..), 또는 이름 앞부분으로 백귀를 찾음"""
+    """이름 / 번호 / 자동완성 글자('1. 남성 백귀 (50/50)') / 띄어쓰기 달라도 / 이름 앞부분 으로 백귀를 찾음"""
     t = (text or "").strip()
+    t = re.sub(r"\s*\(\s*\d+\s*/\s*\d+\s*\)\s*$", "", t)          # 끝의 (50/50) 제거
+    m = re.match(r"^(\d+)\s*[.)]\s*(.*)$", t)                           # 앞의 '1.' 제거
+    if m:
+        t = m.group(2).strip() or m.group(1)
     if not t:
         return None
     for e in b.enemies:
@@ -167,7 +172,11 @@ def find_enemy(b, text):
             return e
     if t.isdigit() and 1 <= int(t) <= len(b.enemies):
         return b.enemies[int(t) - 1]
-    cands = [e for e in b.enemies if e.name.startswith(t) and e.alive]
+    flat = re.sub(r"\s+", "", t)
+    for e in b.enemies:
+        if re.sub(r"\s+", "", e.name) == flat:
+            return e
+    cands = [e for e in b.enemies if e.alive and flat in re.sub(r"\s+", "", e.name)]
     return cands[0] if len(cands) == 1 else None
 
 
@@ -271,6 +280,8 @@ class SheetStore:
     def load_runners(self): return parse_runners(self._wb())
     def load_enemies(self): return parse_enemies(self._wb())
     def load_items(self): return parse_items(self._wb())
+    def load_lookup(self):
+        wb = self._wb(); return parse_runners(wb), parse_items(wb)
     def set_hp(self, uid, hp): return self._post({"action": "hp", "uid": str(uid), "hp": hp})
     def hp_delta(self, uid, delta): return self._post({"action": "hp_delta", "uid": str(uid), "delta": delta})
     def infect(self, uid, add, note): return self._post({"action": "infect", "uid": str(uid), "add": add, "note": note})
@@ -290,6 +301,8 @@ class LocalStore:
     def load_runners(self): return parse_runners(self._wb())
     def load_enemies(self): return parse_enemies(self._wb())
     def load_items(self): return parse_items(self._wb())
+    def load_lookup(self):
+        wb = self._wb(); return parse_runners(wb), parse_items(wb)
 
     @staticmethod
     def _runner_row(ws, uid):
@@ -387,18 +400,18 @@ store = SheetStore() if (SHEET_ID and SHEET_WEBHOOK) else LocalStore()
 if SHEET_ID and not SHEET_WEBHOOK:
     print("⚠ SHEET_ID 는 있는데 SHEET_WEBHOOK 이 없어 시트 쓰기가 안 됩니다. snow.xlsx 파일 모드로 동작합니다.")
 
-_items_cache = {"ts": 0.0, "items": []}
+_cache = {"items": [], "runners": [], "started": False}
 
 
-async def items_cached():
-    """자동완성용: 3초 제한 때문에 오래 걸리면 지난 값을 그대로 씀"""
-    if time.monotonic() - _items_cache["ts"] > 30:
-        _items_cache["ts"] = time.monotonic()
+async def cache_loop():
+    """자동완성은 3초 안에 답해야 해서, 시트(러너·아이템)를 20초마다 미리 읽어 둡니다"""
+    while True:
         try:
-            _items_cache["items"] = await asyncio.wait_for(asyncio.to_thread(store.load_items), 2.5)
-        except Exception:
-            pass
-    return _items_cache["items"]
+            runners, items = await asyncio.to_thread(store.load_lookup)
+            _cache["runners"], _cache["items"] = runners, items
+        except Exception as e:
+            print("자동완성용 시트 읽기 실패:", e)
+        await asyncio.sleep(20)
 
 
 # ============================== 감염도 판정 ==============================
@@ -572,8 +585,8 @@ async def do_attack(i, target_text, note, item):
             return await private(i, "이번 라운드의 행동을 이미 마쳤습니다.")
         e = find_enemy(b, target_text)
         if not e or not e.alive:
-            alive = ", ".join(f"{n}. {x.name}" for n, x in enumerate(b.enemies, 1) if x.alive)
-            return await private(i, f"공격 대상을 찾을 수 없습니다. 대상: {alive}")
+            alive = ", ".join(f"{x.name} (번호 {n})" for n, x in enumerate(b.enemies, 1) if x.alive)
+            return await private(i, f"공격 대상을 찾을 수 없습니다. `대상` 칸에 백귀 이름이나 번호를 입력하세요.\n지금 대상: {alive}")
         bonus, item_txt = 0, ""
         if item:
             try:
@@ -862,6 +875,9 @@ tree = app_commands.CommandTree(client)
 
 @client.event
 async def on_ready():
+    if not _cache["started"]:
+        _cache["started"] = True
+        asyncio.create_task(cache_loop())
     await tree.sync()
     print("ready")
 
@@ -880,11 +896,14 @@ async def enemy_choices(i, current):
 
 async def item_choices(i, current, kind):
     cur = (current or "").strip()
+    me = next((x for x in _cache["runners"] if x["uid"] == i.user.id), None)
+    names = {n for n in (me["name"] if me else None, i.user.display_name, getattr(i.user, "name", None),
+                         getattr(i.user, "global_name", None)) if n}
     out, seen = [], set()
-    for x in await items_cached():
+    for x in _cache["items"]:
         if x["kind"] != kind or x["name"] in seen:
             continue
-        if not owner_match(x["owner"], i.user.id, i.user.display_name):    # 소유자 칸에 ID 또는 (디스코드 표시) 이름이 적힌 아이템만
+        if not (_txt(x["owner"]) == str(i.user.id) or _txt(x["owner"]) in names):   # 소유자 칸: 내 ID, 시트의 러너 이름, 디스코드 닉네임 중 하나
             continue
         if x["left"] is not None and x["left"] <= 0:
             continue
