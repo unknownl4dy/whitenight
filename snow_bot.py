@@ -54,7 +54,7 @@ DEFAULT_ENEMY_HP = 50        # 백귀 기본 체력
 DEFAULT_ENEMY_DICE = 20      # 백귀 기본 공격 다이스
 FLEE_DIE, FLEE_NEED = 10, 7  # 도주: D10, 7 이상 성공
 MAX_RUNNERS = 4              # 한 전투에 참가할 수 있는 러너 수
-PHASE_DELAY = 2              # 백귀 반격 전에 잠깐 쉬는 시간(초)
+PHASE_DELAY = 5              # 마지막 러너가 행동한 뒤 백귀가 반격하기까지 기다리는 시간(초)
 
 # --- 감염도 (유저에게 비공개) ---
 FULL_HIT_DIE = 20            # 풀데미지(백귀 공격 다이스의 최댓값)를 맞았을 때
@@ -582,11 +582,12 @@ async def do_attack(i, target_text, note, item):
         r.acted = True
         em = discord.Embed(title=f"⚔️ {r.name}의 공격", color=COLOR_ATK,
                            description=(f"*{note}*\n\n" if note else "") + f"**{e.name}** 을(를) 공격했다!")
-        em.add_field(name="공격 다이스", value=f"D{RUNNER_DICE} → **{roll}**{item_txt} = **{total}**", inline=True)
-        em.add_field(name=f"{e.name} 체력", value=f"{hp_line(before, e.max_hp)}\n→ {hp_line(e.hp, e.max_hp)}"
-                     + ("  💀 쓰러졌다" if not e.alive else ""), inline=False)
+        dice_txt = f"D{RUNNER_DICE} → **{roll}**" + (f"{item_txt} = **{total}**" if item_txt else "")
+        em.add_field(name="공격 다이스", value=dice_txt, inline=True)
+        em.add_field(name=f"{e.name} 체력", value=hp_line(e.hp, e.max_hp) + ("  💀 쓰러졌다" if not e.alive else ""), inline=False)
         left = pending_names(b)
-        em.set_footer(text="남은 행동자: " + (", ".join(left) if left else "없음"))
+        if left:
+            em.set_footer(text="남은 행동자: " + ", ".join(left))
         await b.channel.send(embed=em)
         await private(i, "✅ 공격했습니다.")
         await after_action(b)
@@ -616,7 +617,8 @@ async def do_flee(i):
                            description=f"D{FLEE_DIE} → **{roll}** (≥{FLEE_NEED} 성공)\n"
                            + ("**도주 성공!** 전장을 벗어났다." if ok else "**도주 실패…** 그대로 공격을 받게 된다."))
         left = pending_names(b)
-        em.set_footer(text="남은 행동자: " + (", ".join(left) if left else "없음"))
+        if left:
+            em.set_footer(text="남은 행동자: " + ", ".join(left))
         await b.channel.send(embed=em)
         await private(i, "✅ 도주를 시도했습니다.")
         await after_action(b)
