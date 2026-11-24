@@ -16,6 +16,9 @@
   "백귀"   : 이름 | 체력 | 공격(주사위 면수, 비우면 20) | 조(비우면 모든 조)      ← 다음 전투에 나올 백귀를 적어두는 곳
   "아이템" : 아이템명 | 종류(회복/공격) | 값 | 소유자(디스코드ID 또는 러너 이름) | 남은횟수 | 비고
               · 모든 아이템은 1회용: 남은횟수를 비우거나 1로 적으면 한 번 쓰고 끝 (2 이상이면 그 횟수만큼)
+  "자원"   : 맨 윗줄 약품 | 목재 | 고철, 둘째 줄에 공동 자원 개수 (모두가 함께 쓰는 자원, 총괄이 직접 관리)
+  "웨이브" : 날짜(2026-11-24 형식) | 비율(예: 0.8) | 전체인원수(비우면 '러너' 탭 인원수)   ← 날마다 한 줄씩 총괄이 적음
+  "방어막" : 날짜 | 방어막수 | 필요한백귀수 | 결과      ← 봇이 자동으로 만듭니다
   "감염기록" : 봇이 자동으로 만듭니다 (감염도가 오를 때마다 한 줄)
 
 규칙 요약
@@ -34,7 +37,9 @@ import sys
 import threading
 import time
 import urllib.request
+import math
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
@@ -63,6 +68,13 @@ FULL_HIT_DIE = 20            # 풀데미지(백귀 공격 다이스의 최댓값
 FULL_HIT_ONCE = True         # True: 전투당 한 번만 굴림 / False: 풀데미지를 맞은 횟수만큼 굴림
 HP_BRACKETS = [(30, 20), (50, 15), (70, 10)]   # (체력이 이 값 이하일 때, 굴릴 주사위 면수) - 가장 낮은 구간 하나만 적용
 INVESTIGATE_DIE = 5          # 조사 한 번당 D5
+
+# --- 방어막 ---
+RES_ORDER = ["약품", "목재", "고철"]   # 방어막은 반드시 이 순서로 반복해서 세움 (약품-목재-고철-약품-…)
+BARRIER_MAX_PER_USE = 40     # 한 번에 만들 수 있는 최대 개수
+BARRIER_WINDOW = None        # 방어막 생성 시간을 제한하려면 ("23:20", "23:30") 처럼 적기. None 이면 항상 가능
+SHOW_ZOMBIE_COUNT = False    # True 면 방어막 결과 카드에 그날 들어오는 백귀 수도 보여줌 (기본은 성공/실패만)
+KST = timezone(timedelta(hours=9))
 
 ATTACK_VERBS = ["물어뜯는다", "할퀸다", "달려들어 할퀸다", "목덜미를 노리고 덤빈다", "으르렁거리며 물어뜯는다"]
 
@@ -216,6 +228,77 @@ def owner_match(cell_value, uid, name):
     return s != "" and (s == str(uid) or s == name)
 
 
+def barrier_plan(start, n, have):
+    """방어막을 start개 세운 상태에서 n개를 더 세울 때: (필요 자원, 지금 자원으로 만들 수 있는 최대 개수)"""
+    need = {r: 0 for r in RES_ORDER}
+    for k in range(start, start + n):
+        need[RES_ORDER[k % 3]] += 1
+    can, used = 0, {r: 0 for r in RES_ORDER}
+    for k in range(start, start + n):
+        r = RES_ORDER[k % 3]
+        if used[r] + 1 > have.get(r, 0):
+            break
+        used[r] += 1; can += 1
+    return need, can
+
+
+def barrier_shortage_text(start, n, have):
+    need, can = barrier_plan(start, n, have)
+    lack = [f"{r} {need[r] - have.get(r, 0)}개 부족(필요 {need[r]}, 보유 {have.get(r, 0)})" for r in RES_ORDER if need[r] > have.get(r, 0)]
+    return f"자원이 부족합니다: {', '.join(lack)}. 지금 공동 자원으로는 최대 {can}개까지 만들 수 있습니다. (다음 순서: {RES_ORDER[start % 3]})"
+
+
+def zombies_needed(people, ratio):
+    """그날 들어오는 백귀 수 = 전체 인원수 × 비율 (소수점은 올림)"""
+    return math.ceil(people * ratio - 1e-9)
+
+
+def date_text(v):
+    if isinstance(v, datetime):
+        return v.strftime("%Y-%m-%d")
+    return _txt(v)
+
+
+def parse_resources(wb):
+    """공동 자원 {약품, 목재, 고철}: '자원' 탭 첫 줄이 제목, 둘째 줄이 개수"""
+    if "자원" not in wb.sheetnames:
+        return None
+    rows = list(wb["자원"].iter_rows(min_row=1, max_row=2, values_only=True))
+    head = [_txt(x) for x in rows[0]] if rows else []
+    vals = rows[1] if len(rows) > 1 else ()
+    return {r: _int(vals[head.index(r)] if r in head and head.index(r) < len(vals) else 0, 0) for r in RES_ORDER}
+
+
+def parse_wave(wb, date):
+    """'웨이브' 탭에서 오늘 날짜 줄 → (비율, 인원수 직접지정 또는 None). 없으면 None"""
+    if "웨이브" not in wb.sheetnames:
+        return None
+    for row in wb["웨이브"].iter_rows(min_row=2, values_only=True):
+        if row and date_text(row[0]) == date and len(row) > 1 and _txt(row[1]) != "":
+            try:
+                ratio = float(row[1])
+            except (TypeError, ValueError):
+                continue
+            ppl = _int(row[2], 0) if len(row) > 2 and _txt(row[2]) != "" else None
+            return ratio, (ppl or None)
+    return None
+
+
+def barrier_status(wb, date):
+    """오늘의 방어 상황 계산 (읽기 전용): 인원, 비율, 필요한 백귀 수, 현재 방어막 수"""
+    wave = parse_wave(wb, date)
+    if wave is None:
+        raise StoreError(f"시트 '웨이브' 탭에 오늘({date}) 날짜 줄이 없습니다. 날짜와 비율을 적어 주세요.")
+    ratio, ppl = wave
+    people = ppl or len(parse_runners(wb))
+    built = 0
+    if "방어막" in wb.sheetnames:
+        for row in wb["방어막"].iter_rows(min_row=2, values_only=True):
+            if row and date_text(row[0]) == date:
+                built = _int(row[1] if len(row) > 1 else 0, 0)
+    return {"date": date, "people": people, "ratio": ratio, "required": zombies_needed(people, ratio), "built": built}
+
+
 def parse_runners(wb):
     out = []
     for row in wb["러너"].iter_rows(min_row=2, values_only=True):
@@ -285,6 +368,11 @@ class SheetStore:
         wb = self._wb(); return parse_runners(wb), parse_items(wb)
     def set_hp(self, uid, hp): return self._post({"action": "hp", "uid": str(uid), "hp": hp})
     def hp_delta(self, uid, delta): return self._post({"action": "hp_delta", "uid": str(uid), "delta": delta})
+    def transfer(self, owner_uid, target_uid, item):
+        return self._post({"action": "transfer", "owner": str(owner_uid), "uid": str(target_uid), "item": item})
+    def load_resources(self): return parse_resources(self._wb())
+    def barrier(self, n, date): return self._post({"action": "barrier", "n": n, "date": date})
+    def barrier_status(self, date): return barrier_status(self._wb(), date)
     def infect(self, uid, add, note): return self._post({"action": "infect", "uid": str(uid), "add": add, "note": note})
     def heal(self, target_uid, owner_uid, item):
         return self._post({"action": "heal", "uid": str(target_uid), "owner": str(owner_uid), "item": item})
@@ -318,6 +406,57 @@ class LocalStore:
             mx = _int(ws.cell(r, 4).value, DEFAULT_RUNNER_HP) or DEFAULT_RUNNER_HP
             ws.cell(r, 3).value = max(0, min(mx, hp)); wb.save(EXCEL_PATH)
             return {"ok": True}
+
+    def load_resources(self): return parse_resources(self._wb())
+    def barrier_status(self, date): return barrier_status(self._wb(), date)
+
+    def transfer(self, owner_uid, target_uid, item):
+        with self.lock:
+            wb = self._wb(False)
+            runners = {x["uid"]: x for x in parse_runners(wb)}
+            if owner_uid not in runners:
+                raise StoreError("명단에서 러너를 찾을 수 없습니다")
+            if target_uid not in runners:
+                raise StoreError("받는 사람이 러너 명단에 없습니다")
+            found = self._find_item(wb, owner_uid, runners[owner_uid]["name"], item)
+            if not found:
+                raise StoreError(f"'{item}' 을(를) 갖고 있지 않거나 이미 다 썼습니다")
+            ws, r, k, left = found
+            ws.cell(r, 4).value = runners[target_uid]["name"]
+            wb.save(EXCEL_PATH)
+            return {"ok": True, "kind": k, "value": _int(ws.cell(r, 3).value), "left": left, "to": runners[target_uid]["name"]}
+
+    def barrier(self, n, date):
+        with self.lock:
+            wb = self._wb(False)
+            st = barrier_status(wb, date)
+            have = parse_resources(wb)
+            if have is None:
+                raise StoreError("시트에 '자원' 탭이 없습니다")
+            start = st["built"]
+            need, can = barrier_plan(start, n, have)
+            if can < n:
+                raise StoreError(barrier_shortage_text(start, n, have))
+            ws = wb["자원"]
+            head = [_txt(c.value) for c in ws[1]]
+            for r in RES_ORDER:
+                col = head.index(r) + 1
+                ws.cell(2, col).value = have[r] - need[r]
+            total = start + n
+            success = total >= st["required"]
+            if "방어막" not in wb.sheetnames:
+                wb.create_sheet("방어막").append(["날짜", "방어막수", "필요한백귀수", "결과"])
+            bs = wb["방어막"]
+            row = next((x for x in range(2, bs.max_row + 1) if date_text(bs.cell(x, 1).value) == date), None)
+            vals = [date, total, st["required"], "성공" if success else "실패"]
+            if row:
+                for c, v in enumerate(vals, 1):
+                    bs.cell(row, c).value = v
+            else:
+                bs.append(vals)
+            wb.save(EXCEL_PATH)
+            return {"ok": True, "total": total, "required": st["required"], "success": success, "used": need,
+                    "left": {r: have[r] - need[r] for r in RES_ORDER}, "next": RES_ORDER[total % 3]}
 
     def hp_delta(self, uid, delta):
         with self.lock:
@@ -670,6 +809,79 @@ async def do_heal(i, item, target_member):
     await private(i, "✅ 사용했습니다." + ("" if left is None else f" (남은 횟수 {left})"))
 
 
+async def do_transfer(i, item, target):
+    await i.response.defer(ephemeral=True)
+    if getattr(target, "bot", False) or target.id == i.user.id:
+        return await private(i, "다른 러너를 지정하세요.")
+    if uid_in_battle(i.user.id) or uid_in_battle(target.id):
+        return await private(i, "전투 중에는 아이템을 양도할 수 없습니다. 전투가 끝난 뒤 사용하세요.")
+    try:
+        res = await asyncio.to_thread(store.transfer, i.user.id, target.id, item)
+    except StoreError as ex:
+        return await private(i, str(ex))
+    me = next((x for x in _cache["runners"] if x["uid"] == i.user.id), None)
+    giver = me["name"] if me else i.user.display_name
+    icon = "🍖" if res.get("kind") == "회복" else "🗡️"
+    em = discord.Embed(title="🎁 아이템 양도", color=COLOR_INFO,
+                       description=f"**{giver}** 이(가) {icon} **{item}** 을(를) **{res.get('to') or target.display_name}** 에게 건넸다.")
+    await i.channel.send(embed=em)
+    await private(i, "✅ 양도했습니다.")
+    try:                                                   # 자동완성 목록이 바로 바뀌도록 새로 읽어 둠
+        _cache["runners"], _cache["items"] = await asyncio.to_thread(store.load_lookup)
+    except Exception:
+        pass
+
+
+async def do_barrier(i, n):
+    await i.response.defer(ephemeral=True)
+    if n < 1 or n > BARRIER_MAX_PER_USE:
+        return await private(i, f"방어막 수는 1~{BARRIER_MAX_PER_USE} 사이로 입력하세요.")
+    if BARRIER_WINDOW:
+        now = datetime.now(KST).strftime("%H:%M")
+        if not (BARRIER_WINDOW[0] <= now < BARRIER_WINDOW[1]):
+            return await private(i, f"방어막은 {BARRIER_WINDOW[0]} ~ {BARRIER_WINDOW[1]} 사이에만 만들 수 있습니다.")
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    try:
+        res = await asyncio.to_thread(store.barrier, n, today)
+    except StoreError as ex:
+        return await private(i, str(ex))
+    me = next((x for x in _cache["runners"] if x["uid"] == i.user.id), None)
+    name = me["name"] if me else i.user.display_name
+    ok = res["success"]
+    em = discord.Embed(title="🛡️ 방어막 설치", color=COLOR_ATK if ok else COLOR_ENEMY,
+                       description=f"**{name}** 이(가) 방어막 **{n}개** 를 세웠다.")
+    em.add_field(name="방어 결과",
+                 value=("✅ **방어 성공** — 방어막이 몰려오는 백귀를 모두 막아냈다." if ok
+                        else "⚠️ **방어 실패** — 막지 못한 백귀가 거점으로 넘어왔다.")
+                 + (f"\n오늘 들어오는 백귀 {res['required']}마리" if SHOW_ZOMBIE_COUNT else ""), inline=False)
+    em.add_field(name="사용한 자원", value=" · ".join(f"{k} {v}" for k, v in res["used"].items() if v) or "-", inline=True)
+    em.add_field(name="오늘 방어막", value=f"총 **{res['total']}개**\n다음 순서: {res['next']}", inline=True)
+    em.add_field(name="남은 공동 자원", value=" · ".join(f"{k} {v}" for k, v in res["left"].items()), inline=False)
+    em.set_footer(text="방어막은 약품 → 목재 → 고철 순서로 쌓이며, 하루가 지나면 사라집니다")
+    await i.channel.send(embed=em)
+    await private(i, "✅ 방어막을 만들었습니다.")
+
+
+async def do_barrier_status(i):
+    await i.response.defer(ephemeral=True)
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    try:
+        st = await asyncio.to_thread(store.barrier_status, today)
+        have = await asyncio.to_thread(store.load_resources)
+    except StoreError as ex:
+        return await private(i, str(ex))
+    except Exception as ex:
+        return await private(i, f"시트를 읽지 못했습니다: {ex}")
+    short = st["required"] - st["built"]
+    em = discord.Embed(title=f"🛡️ 오늘({today}) 방어 현황 (총괄 전용)", color=COLOR_INFO)
+    em.add_field(name="들어오는 백귀", value=f"**{st['required']}마리**\n(인원 {st['people']} × 비율 {st['ratio']:g})", inline=True)
+    em.add_field(name="현재 방어막", value=f"**{st['built']}개**\n" + ("✅ 충분" if short <= 0 else f"⚠️ {short}개 부족"), inline=True)
+    if have is not None:
+        em.add_field(name="공동 자원", value=" · ".join(f"{k} {v}" for k, v in have.items()), inline=False)
+    em.set_footer(text=f"다음에 쌓을 자원: {RES_ORDER[st['built'] % 3]}")
+    await i.followup.send(embed=em, ephemeral=True)
+
+
 async def do_judge(i, note):
     await i.response.defer(ephemeral=True)
     roll = d(JUDGE_DIE)
@@ -698,6 +910,12 @@ async def do_info(i):
     mine = [x for x in items if owner_match(x["owner"], i.user.id, me["name"]) and (x["left"] is None or x["left"] > 0)]
     em = discord.Embed(title=f"🧍 {me['name']}", color=COLOR_INFO)
     em.add_field(name="체력", value=hp_line(me["hp"], me["max_hp"]), inline=False)
+    try:
+        rs = await asyncio.to_thread(store.load_resources)
+    except Exception:
+        rs = None
+    if rs is not None:
+        em.add_field(name="공동 자원", value=" · ".join(f"{k} {v}" for k, v in rs.items()), inline=False)
     if mine:
         em.add_field(name="아이템", value=clip("\n".join(
             f"{'🍖' if x['kind'] == '회복' else '🗡️'} **{x['name']}** "
@@ -917,7 +1135,7 @@ async def item_choices(i, current, kind):
                          getattr(i.user, "global_name", None)) if n}
     out, seen = [], set()
     for x in _cache["items"]:
-        if x["kind"] != kind or x["name"] in seen:
+        if (kind and x["kind"] != kind) or x["name"] in seen:
             continue
         if not (_txt(x["owner"]) == str(i.user.id) or _txt(x["owner"]) in names):   # 소유자 칸: 내 ID, 시트의 러너 이름, 디스코드 닉네임 중 하나
             continue
@@ -962,10 +1180,33 @@ async def ac_heal_item(i: discord.Interaction, current: str):
     return await item_choices(i, current, "회복")
 
 
+@tree.command(name="방어막", description="공동 자원으로 방어막을 만듭니다 (약품→목재→고철 순서로 자동 차감)")
+@app_commands.describe(방어막수="만들 방어막 개수 (대표 한 명이 입력)")
+async def cmd_barrier(i: discord.Interaction, 방어막수: int):
+    await do_barrier(i, 방어막수)
+
+
+@tree.command(name="방어막현황", description="[총괄] 오늘 들어오는 백귀 수와 방어막 수를 확인합니다")
+@app_commands.default_permissions(manage_guild=True)
+async def cmd_barrier_status(i: discord.Interaction):
+    await do_barrier_status(i)
+
+
 @tree.command(name="판정", description="D10 판정을 합니다 (7 이상 성공)")
 @app_commands.describe(지문="무엇을 판정하는지 적어 주세요 (선택)")
 async def cmd_judge(i: discord.Interaction, 지문: str = None):
     await do_judge(i, 지문)
+
+
+@tree.command(name="양도", description="내 아이템을 다른 러너에게 넘깁니다 (소유자가 바뀜)")
+@app_commands.describe(아이템="넘길 아이템 이름 (내 것만)", 대상자="받을 러너")
+async def cmd_transfer(i: discord.Interaction, 아이템: str, 대상자: discord.Member):
+    await do_transfer(i, 아이템, 대상자)
+
+
+@cmd_transfer.autocomplete("아이템")
+async def ac_transfer_item(i: discord.Interaction, current: str):
+    return await item_choices(i, current, None)
 
 
 @tree.command(name="내정보", description="내 체력과 아이템을 확인합니다 (나에게만 보임)")
@@ -1043,6 +1284,12 @@ def make_sample():
     ws.append(["이름", "체력", "공격(주사위 면수)", "조(비우면 모든 조)"])
     ws.append(["백귀1", 50, 20, 1])
     ws.append(["백귀2", 50, 20, 1])
+    ws = wb.create_sheet("자원")
+    ws.append(["약품", "목재", "고철"])
+    ws.append([6, 5, 5])
+    ws = wb.create_sheet("웨이브")
+    ws.append(["날짜", "비율", "전체인원수(비우면 러너 탭 인원수)"])
+    ws.append([datetime.now(KST).strftime("%Y-%m-%d"), 1.2, 14])
     ws = wb.create_sheet("아이템")
     ws.append(["아이템명", "종류(회복/공격)", "값", "소유자(ID 또는 이름)", "남은횟수", "비고"])
     ws.append(["통조림", "회복", 20, "111111111111111111", 1, "1회용"])
