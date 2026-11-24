@@ -388,6 +388,8 @@ class SheetStore:
         return self._post({"action": "transfer", "owner": str(owner_uid), "uid": str(target_uid), "item": item})
     def load_resources(self): return parse_resources(self._wb())
     def barrier(self, n, date): return self._post({"action": "barrier", "n": n, "date": date})
+    def barrier_remove(self, date, count, refund):
+        return self._post({"action": "barrier_remove", "date": date, "count": count or 0, "refund": bool(refund)})
     def barrier_status(self, date): return barrier_status(self._wb(), date)
     def infect(self, uid, add, note): return self._post({"action": "infect", "uid": str(uid), "add": add, "note": note})
     def heal(self, target_uid, owner_uid, item):
@@ -441,6 +443,33 @@ class LocalStore:
             ws.cell(r, 4).value = runners[target_uid]["name"]
             wb.save(EXCEL_PATH)
             return {"ok": True, "kind": k, "value": _int(ws.cell(r, 3).value), "left": left, "to": runners[target_uid]["name"]}
+
+    def barrier_remove(self, date, count, refund):
+        with self.lock:
+            wb = self._wb(False)
+            bs = find_tab(wb, "방어벽")
+            row = next((x for x in range(2, bs.max_row + 1) if date_text(bs.cell(x, 1).value) == date), None) if bs else None
+            built = _int(bs.cell(row, 2).value, 0) if row else 0
+            if built <= 0:
+                raise StoreError("오늘 만든 방어벽이 없습니다")
+            k = built if not count or count >= built else count
+            new = built - k
+            refunded = {r: 0 for r in RES_ORDER}
+            if refund:
+                for idx in range(new, built):
+                    refunded[RES_ORDER[idx % 3]] += 1
+                ws = find_tab(wb, "자원")
+                if ws is not None:
+                    head = [_txt(c.value) for c in ws[1]]
+                    for r in RES_ORDER:
+                        col = head.index(r) + 1
+                        ws.cell(2, col).value = _int(ws.cell(2, col).value, 0) + refunded[r]
+            required = _int(bs.cell(row, 3).value, 0)
+            bs.cell(row, 2).value = new
+            bs.cell(row, 4).value = "성공" if new >= required else "실패"
+            wb.save(EXCEL_PATH)
+            return {"ok": True, "removed": k, "total": new, "required": required, "refunded": refunded if refund else None,
+                    "success": new >= required}
 
     def barrier(self, n, date):
         with self.lock:
@@ -878,6 +907,23 @@ async def do_barrier(i, n):
     await private(i, "✅ 방어벽을 만들었습니다.")
 
 
+async def do_barrier_remove(i, count, refund):
+    await i.response.defer(ephemeral=True)
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    if count is not None and count < 1:
+        return await private(i, "삭제할 개수는 1 이상으로 입력하세요. (비우면 오늘 방어벽을 전부 삭제)")
+    try:
+        res = await asyncio.to_thread(store.barrier_remove, today, count, refund)
+    except StoreError as ex:
+        return await private(i, str(ex))
+    text = f"✅ 오늘({today}) 방어벽 {res['removed']}개를 삭제했습니다. 현재 {res['total']}개."
+    if res.get("refunded") is not None:
+        text += "\n자원 반환: " + (" · ".join(f"{k} {v}" for k, v in res["refunded"].items() if v) or "없음")
+    else:
+        text += "\n(자원은 돌려주지 않았습니다. 필요하면 시트 '자원' 탭을 직접 고치세요.)"
+    await private(i, text)
+
+
 async def do_barrier_status(i):
     await i.response.defer(ephemeral=True)
     today = datetime.now(KST).strftime("%Y-%m-%d")
@@ -1200,6 +1246,14 @@ async def ac_heal_item(i: discord.Interaction, current: str):
 @app_commands.describe(방어벽수="만들 방어벽 개수 (대표 한 명이 입력)")
 async def cmd_barrier(i: discord.Interaction, 방어벽수: int):
     await do_barrier(i, 방어벽수)
+
+
+@tree.command(name="방어벽삭제", description="[총괄] 오늘 만든 방어벽을 삭제합니다 (테스트·실수 정리용)")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(개수="최근에 쌓은 것부터 이만큼만 삭제 (비우면 오늘 방어벽 전부)",
+                       자원돌려주기="True 면 삭제한 방어벽에 쓰인 자원을 공동 자원에 돌려줌 (기본 False)")
+async def cmd_barrier_remove(i: discord.Interaction, 개수: int = None, 자원돌려주기: bool = False):
+    await do_barrier_remove(i, 개수, 자원돌려주기)
 
 
 @tree.command(name="방어벽현황", description="[총괄] 오늘 들어오는 백귀 수와 방어벽 수를 확인합니다")
