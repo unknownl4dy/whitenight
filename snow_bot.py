@@ -19,6 +19,7 @@
   "자원"   : 맨 윗줄 약품 | 목재 | 고철, 둘째 줄에 공동 자원 개수 (모두가 함께 쓰는 자원, 총괄이 직접 관리)
   "웨이브" : 날짜(2026-11-24 형식) | 비율(예: 0.8) | 전체인원수(비우면 '러너' 탭 인원수)   ← 날마다 한 줄씩 총괄이 적음
   "방어벽" : 날짜 | 방어벽수 | 필요한백귀수 | 결과      ← 봇이 자동으로 만듭니다
+  "운세기록" : 봇이 자동으로 만듭니다 (하루 횟수·아이템 지급 수 확인용)
   "감염기록" : 봇이 자동으로 만듭니다 (감염도가 오를 때마다 한 줄)
 
 규칙 요약
@@ -75,6 +76,65 @@ BARRIER_MAX_PER_USE = 40     # 한 번에 만들 수 있는 최대 개수
 BARRIER_WINDOW = None        # 방어벽 생성 시간을 제한하려면 ("23:20", "23:30") 처럼 적기. None 이면 항상 가능
 SHOW_ZOMBIE_COUNT = False    # True 면 방어벽 결과 카드에 그날 들어오는 백귀 수도 보여줌 (기본은 성공/실패만)
 KST = timezone(timedelta(hours=9))
+
+# --- 운세 (라디오 운세) ---
+FORTUNE_DAILY_LIMIT = 1         # 한 사람이 하루(한국 시간)에 볼 수 있는 횟수. 0이면 무제한
+FORTUNE_CUT_CHANCE = 0.03       # 감염도가 줄어들 확률 (공개 문구는 '머리가 맑아진다' 같은 말뿐)
+FORTUNE_CUT_RANGE = (1, 2)      # 줄어드는 감염도 양 (이 범위에서 무작위)
+FORTUNE_ITEM_CHANCE = 0.05      # 아이템을 얻을 확률 (17명 기준 하루 평균 1개 안팎, 하루 총 2개까지)
+FORTUNE_ITEM_DAILY_CAP = 2      # 하루에 운세로 나갈 수 있는 아이템 총 개수 (전체 합계, 먼저 뽑은 사람이 가져감)
+# (이름, 종류, 값, 가중치) — 공격템의 값은 공격 보정, 회복템의 값은 회복량. 모두 1회용
+FORTUNE_ITEMS = [
+    ("부러진 쇠지렛대", "공격", 3, 35),
+    ("날 선 손도끼", "공격", 5, 15),
+    ("마른 건빵 한 봉지", "회복", 10, 35),
+    ("온기가 남은 통조림", "회복", 20, 15),
+]
+FORTUNE_TITLE = "📻 라디오 운세"
+FORTUNE_INTRO = "낡은 라디오의 다이얼을 천천히 돌린다. 지직거리는 잡음 사이로 누군가의 목소리가 끼어든다."
+# (등급, 가중치, 한마디들) — 오늘의 운세 방송 느낌. 문구는 마음껏 추가/수정하세요
+FORTUNE_RANKS = [
+    ("대길 🌟", 8, ["오늘은 뭘 해도 술술 풀리는 날! 평소 미뤄둔 일에 도전해 보세요.", "별자리고 뭐고 오늘은 당신이 1위입니다. 눈보라도 비켜 갈 기세예요."]),
+    ("길 ✨", 24, ["좋은 일이 슬쩍 다가오는 하루. 작은 행운을 놓치지 마세요.", "오늘은 운이 좋을 것 같습니다. 기분 좋게 시작해 보세요."]),
+    ("중길 🙂", 28, ["무난하고 평온한 하루. 평범함이 가장 큰 행운일지도요.", "크게 좋지도 나쁘지도 않은 날. 꾸준함이 열쇠입니다."]),
+    ("소흉 😐", 24, ["살짝 삐걱거리는 날. 서두르면 손해를 봅니다.", "오늘은 운이 조금 기울었어요. 한 번 더 확인하고 움직이세요."]),
+    ("흉 ☁️", 14, ["오늘은 운이 나쁠 것 같습니다. 조용히 몸을 사리세요.", "먹구름 주의보! 괜한 일에 휘말리지 않도록 조심하세요."]),
+    ("대흉 ⚡", 2, ["오늘 라디오를 켠 당신, 용기가 대단합니다. 부디 무사하시길…", "이럴 수가, 오늘은 가만히 있는 게 최고의 전략입니다."]),
+]
+FORTUNE_ADVICE = [
+    "친구와 말다툼은 금물! 한마디 참으면 두 마디가 편해집니다.",
+    "남의 말을 끝까지 들어주면 뜻밖의 도움을 받아요.",
+    "오늘은 먼저 인사를 건네 보세요. 따뜻한 말 한마디가 돌아옵니다.",
+    "배가 고프면 예민해져요. 끼니는 거르지 마세요.",
+    "발밑을 조심하세요. 눈길은 늘 미끄럽습니다.",
+    "혼자 끙끙대지 말고 동료에게 털어놓으면 길이 보입니다.",
+    "오늘은 괜히 큰소리 치지 않기. 작은 약속이 큰 신뢰가 됩니다.",
+    "잠깐의 휴식이 큰 실수를 막아 줍니다. 눈 좀 붙이세요.",
+    "물건을 아끼세요. 오늘 아낀 한 개가 내일의 한 끼가 됩니다.",
+    "뒤를 돌아보지 마세요. 아무것도 없을 거예요. …아마도요.",
+    "오늘은 웃음이 최고의 방한복입니다. 많이 웃으세요.",
+    "급할수록 돌아가세요. 지름길엔 눈이 더 쌓여 있어요.",
+    "누군가 부탁하면 흔쾌히 도와주세요. 복이 되어 돌아옵니다.",
+    "고민은 따뜻한 걸 마시면서 하면 절반으로 줄어듭니다.",
+    "오늘은 동쪽에서 귀인이 나타납니다. 다만 동쪽이 어디인지는 모르겠네요.",
+    "소지품 점검! 잃어버리기 쉬운 날입니다.",
+    "너무 늦은 밤에는 돌아다니지 마세요. 어둠 속에서는 방향 감각이 흐려집니다.",
+    "오늘의 연애운은 눈이 녹는 속도와 비슷합니다. 천천히, 하지만 확실하게.",
+    "말보다 행동! 오늘은 한 걸음이 열 마디보다 낫습니다.",
+    "뜻밖의 칭찬을 듣게 될지도 몰라요. 겸손하게 받아들이세요.",
+]
+FORTUNE_LUCKY = [
+    "마른 양말", "따뜻한 차 한 잔", "녹슨 열쇠", "찢어진 지도", "빨간 털장갑", "반쯤 남은 초", "주머니 속 사탕",
+    "접힌 종이학", "낡은 손목시계", "작은 나침반", "파란 목도리", "깨진 거울 조각", "성냥 한 개비", "동그란 단추",
+    "오래된 엽서", "따끈한 수프", "고장 난 손전등", "털모자", "끈 풀린 군화", "차가운 금속 손잡이",
+]
+FORTUNE_DIRECTION = ["동쪽", "서쪽", "남쪽", "북쪽", "창가 쪽", "난로 옆", "계단 근처", "문 앞"]
+FORTUNE_FOUND = "그런데 오늘은 운이 아주 좋았다! 길을 걷다 눈 속에서 쓸 만한 물건을 주웠다."
+FORTUNE_CLEAR = [       # 감염도가 줄었을 때 (감염이라는 말은 쓰지 않음)
+    "방송을 듣고 있자니 머리가 맑아지는 기분이 든다.",
+    "익숙한 노래가 흘러나온다. 기분이 한결 좋아진다.",
+    "라디오 너머의 목소리에 마음이 가벼워진다.",
+]
 
 ATTACK_VERBS = ["물어뜯는다", "할퀸다", "달려들어 할퀸다", "목덜미를 노리고 덤빈다", "으르렁거리며 물어뜯는다"]
 
@@ -386,6 +446,9 @@ class SheetStore:
     def hp_delta(self, uid, delta): return self._post({"action": "hp_delta", "uid": str(uid), "delta": delta})
     def transfer(self, owner_uid, target_uid, item):
         return self._post({"action": "transfer", "owner": str(owner_uid), "uid": str(target_uid), "item": item})
+    def fortune(self, uid, date, limit, cap, cut, item):
+        return self._post({"action": "fortune", "uid": str(uid), "date": date, "limit": limit, "cap": cap, "cut": cut,
+                           "item": ({"name": item[0], "kind": item[1], "value": item[2]} if item else None)})
     def load_resources(self): return parse_resources(self._wb())
     def barrier(self, n, date): return self._post({"action": "barrier", "n": n, "date": date})
     def barrier_remove(self, date, count, refund):
@@ -427,6 +490,42 @@ class LocalStore:
 
     def load_resources(self): return parse_resources(self._wb())
     def barrier_status(self, date): return barrier_status(self._wb(), date)
+
+    def fortune(self, uid, date, limit, cap, cut, item):
+        with self.lock:
+            wb = self._wb(False)
+            rs = wb["러너"]; r = self._runner_row(rs, uid)
+            name = _txt(rs.cell(r, 1).value)
+            if "운세기록" not in wb.sheetnames:
+                wb.create_sheet("운세기록").append(["시간", "날짜", "이름", "디스코드ID", "감염감소", "아이템"])
+            fs = wb["운세기록"]
+            used, items_today = 0, 0
+            for x in range(2, fs.max_row + 1):
+                if date_text(fs.cell(x, 2).value) == date:
+                    if _txt(fs.cell(x, 4).value) == str(uid):
+                        used += 1
+                    if _txt(fs.cell(x, 6).value):
+                        items_today += 1
+            if limit and used >= limit:
+                raise StoreError("오늘의 라디오 운세는 이미 들었습니다. 내일 다시 해 보세요.")
+            given = None
+            if item and items_today < cap:
+                if "아이템" not in wb.sheetnames:
+                    raise StoreError("시트에 '아이템' 탭이 없습니다")
+                wb["아이템"].append([item[0], item[1], item[2], name, 1, f"운세 {date}"])
+                given = item[0]
+            cut_done = 0
+            if cut > 0:
+                cur = _int(rs.cell(r, 5).value, 0)
+                cut_done = min(cur, cut)
+                if cut_done > 0:
+                    rs.cell(r, 5).value = cur - cut_done
+                    if "감염기록" not in wb.sheetnames:
+                        wb.create_sheet("감염기록").append(["시간", "이름", "디스코드ID", "증가", "합계", "사유"])
+                    wb["감염기록"].append([time.strftime("%Y-%m-%d %H:%M:%S"), name, str(uid), -cut_done, cur - cut_done, "운세"])
+            fs.append([time.strftime("%Y-%m-%d %H:%M:%S"), date, name, str(uid), cut_done, given or ""])
+            wb.save(EXCEL_PATH)
+            return {"ok": True, "count": used + 1, "item_given": given is not None, "cut": cut_done}
 
     def transfer(self, owner_uid, target_uid, item):
         with self.lock:
@@ -877,6 +976,41 @@ async def do_transfer(i, item, target):
         pass
 
 
+async def do_fortune(i):
+    await i.response.defer(ephemeral=True)
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    cut = random.randint(*FORTUNE_CUT_RANGE) if random.random() < FORTUNE_CUT_CHANCE else 0
+    item = None
+    if random.random() < FORTUNE_ITEM_CHANCE:
+        item = random.choices(FORTUNE_ITEMS, weights=[x[3] for x in FORTUNE_ITEMS])[0]
+    try:
+        res = await asyncio.to_thread(store.fortune, i.user.id, today, FORTUNE_DAILY_LIMIT, FORTUNE_ITEM_DAILY_CAP, cut, item)
+    except StoreError as ex:
+        return await private(i, str(ex))
+    me = next((x for x in _cache["runners"] if x["uid"] == i.user.id), None)
+    name = me["name"] if me else i.user.display_name
+    lucky = bool(res.get("item_given") or cut)
+    pool = FORTUNE_RANKS[:2] if lucky else FORTUNE_RANKS
+    rank = random.choices(pool, weights=[x[1] for x in pool])[0]
+    lines = [FORTUNE_INTRO, "", f"📻 **오늘의 운세: {rank[0]}**", random.choice(rank[2]),
+             f"💬 {random.choice(FORTUNE_ADVICE)}",
+             f"🍀 행운의 물건: **{random.choice(FORTUNE_LUCKY)}** · 행운의 방향: **{random.choice(FORTUNE_DIRECTION)}**"]
+    color = COLOR_END if res.get("item_given") else COLOR_INFO
+    if res.get("item_given"):
+        icon = "🗡️" if item[1] == "공격" else "🍖"
+        lines.append(f"\n✨ {FORTUNE_FOUND}\n{icon} **{item[0]}** ({'공격 +' if item[1] == '공격' else '회복 +'}{item[2]}, 1회용) — `/내정보`에서 확인하세요.")
+    if cut:                                                # 감염이라는 말은 숨기고 분위기 문구만
+        lines.append("\n" + random.choice(FORTUNE_CLEAR))
+    em = discord.Embed(title=f"{FORTUNE_TITLE} — {name}", description="\n".join(lines), color=color)
+    await i.channel.send(embed=em)
+    await private(i, "✅ 라디오를 켰습니다.")
+    if res.get("item_given"):
+        try:                                               # 아이템 자동완성 목록이 바로 갱신되도록
+            _cache["runners"], _cache["items"] = await asyncio.to_thread(store.load_lookup)
+        except Exception:
+            pass
+
+
 async def do_barrier(i, n):
     await i.response.defer(ephemeral=True)
     if n < 1 or n > BARRIER_MAX_PER_USE:
@@ -886,18 +1020,23 @@ async def do_barrier(i, n):
         if not (BARRIER_WINDOW[0] <= now < BARRIER_WINDOW[1]):
             return await private(i, f"방어벽은 {BARRIER_WINDOW[0]} ~ {BARRIER_WINDOW[1]} 사이에만 만들 수 있습니다.")
     today = datetime.now(KST).strftime("%Y-%m-%d")
+    me = next((x for x in _cache["runners"] if x["uid"] == i.user.id), None)
+    name = me["name"] if me else i.user.display_name
     try:
         res = await asyncio.to_thread(store.barrier, n, today)
     except StoreError as ex:
+        if str(ex).startswith("자원이 부족합니다"):               # 자원 부족은 모두가 볼 수 있게 채널에 공개
+            em = discord.Embed(title="🛡️ 방어벽 설치 실패", color=COLOR_ENEMY,
+                               description=f"**{name}** 이(가) 방어벽 **{n}개** 를 세우려 했지만 자원이 모자랐다.\n\n{ex}")
+            await i.channel.send(embed=em)
+            return await private(i, "⚠️ 자원이 부족해 만들지 못했습니다.")
         return await private(i, str(ex))
-    me = next((x for x in _cache["runners"] if x["uid"] == i.user.id), None)
-    name = me["name"] if me else i.user.display_name
     ok = res["success"]
     em = discord.Embed(title="🛡️ 방어벽 설치", color=COLOR_ATK if ok else COLOR_ENEMY,
                        description=f"**{name}** 이(가) 방어벽 **{n}개** 를 세웠다.")
     em.add_field(name="방어 결과",
                  value=("✅ **방어 성공** — 방어벽이 몰려오는 백귀를 모두 막아냈다." if ok
-                        else "⚠️ **방어 실패** — 막지 못한 백귀가 거점으로 넘어왔다.")
+                        else "⚠️ **방어 실패** — 막지 못한 백귀가 거점으로 넘어왔다.\n[명일 조사 시 감염 및 백귀 조우 확률이 증가합니다.]")
                  + (f"\n오늘 들어오는 백귀 {res['required']}마리" if SHOW_ZOMBIE_COUNT else ""), inline=False)
     em.add_field(name="사용한 자원", value=" · ".join(f"{k} {v}" for k, v in res["used"].items() if v) or "-", inline=True)
     em.add_field(name="오늘 방어벽", value=f"총 **{res['total']}개**\n다음 순서: {res['next']}", inline=True)
@@ -1260,6 +1399,11 @@ async def cmd_barrier_remove(i: discord.Interaction, 개수: int = None, 자원�
 @app_commands.default_permissions(manage_guild=True)
 async def cmd_barrier_status(i: discord.Interaction):
     await do_barrier_status(i)
+
+
+@tree.command(name="운세", description="낡은 라디오로 오늘의 운세를 듣습니다 (하루 1회)")
+async def cmd_fortune(i: discord.Interaction):
+    await do_fortune(i)
 
 
 @tree.command(name="판정", description="D10 판정을 합니다 (7 이상 성공)")
