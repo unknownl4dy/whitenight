@@ -26,7 +26,7 @@
   러너 체력 100 / 공격 D30(+공격 보정템) / 도주 D10 (7 이상 성공, 자기 차례에 가능)
   백귀 기본 체력 50 / 공격 D20 (시트·명령어로 바꿀 수 있음)
   전투: 러너 전원이 /공격 (또는 /도주) → 백귀가 한꺼번에 반격 → 다시 러너 턴 … 백귀가 모두 쓰러지면 자동 종료
-  감염도(비공개, 전투가 끝난 뒤 판정): 풀데미지 피격 D20 / 체력 70↓ D10 / 50↓ D15 / 30↓ D20 (체력 구간은 가장 낮은 구간 하나만) / 조사마다 D5
+  감염도(비공개, 전투가 끝난 뒤 판정): 풀데미지 피격 D20 / 체력 70↓ D10 / 50↓ D15 / 30↓ D20 (체력 구간은 가장 낮은 구간 하나만) / 조사마다 D5 (전날 방어벽 실패 시 D10)
 """
 import asyncio
 import io
@@ -69,6 +69,7 @@ FULL_HIT_DIE = 20            # 풀데미지(백귀 공격 다이스의 최댓값
 FULL_HIT_ONCE = True         # True: 전투당 한 번만 굴림 / False: 풀데미지를 맞은 횟수만큼 굴림
 HP_BRACKETS = [(30, 20), (50, 15), (70, 10)]   # (체력이 이 값 이하일 때, 굴릴 주사위 면수) - 가장 낮은 구간 하나만 적용
 INVESTIGATE_DIE = 5          # 조사 한 번당 D5
+INVESTIGATE_DIE_FAILED = 10  # 전날 방어벽 구축에 실패했다면 그날 조사는 D10
 
 # --- 방어벽 ---
 RES_ORDER = ["약품", "목재", "고철"]   # 방어벽은 반드시 이 순서로 반복해서 세움 (약품-목재-고철-약품-…)
@@ -375,6 +376,16 @@ def barrier_status(wb, date):
     return {"date": date, "people": people, "ratio": ratio, "required": zombies_needed(people, ratio), "built": built}
 
 
+def prev_barrier_failed(wb, today):
+    """전날(한국 시간) 방어벽이 실패였는지: 전날 웨이브 줄이 있고 방어벽 수가 필요한 백귀 수보다 적으면 True"""
+    y = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    try:
+        st = barrier_status(wb, y)
+    except StoreError:
+        return False
+    return st["built"] < st["required"]
+
+
 def parse_runners(wb):
     out = []
     for row in wb["러너"].iter_rows(min_row=2, values_only=True):
@@ -454,6 +465,7 @@ class SheetStore:
     def barrier_remove(self, date, count, refund):
         return self._post({"action": "barrier_remove", "date": date, "count": count or 0, "refund": bool(refund)})
     def barrier_status(self, date): return barrier_status(self._wb(), date)
+    def prev_failed(self, today): return prev_barrier_failed(self._wb(), today)
     def infect(self, uid, add, note): return self._post({"action": "infect", "uid": str(uid), "add": add, "note": note})
     def heal(self, target_uid, owner_uid, item):
         return self._post({"action": "heal", "uid": str(target_uid), "owner": str(owner_uid), "item": item})
@@ -490,6 +502,7 @@ class LocalStore:
 
     def load_resources(self): return parse_resources(self._wb())
     def barrier_status(self, date): return barrier_status(self._wb(), date)
+    def prev_failed(self, today): return prev_barrier_failed(self._wb(), today)
 
     def fortune(self, uid, date, limit, cap, cut, item):
         with self.lock:
@@ -1127,11 +1140,21 @@ async def do_info(i):
     await i.followup.send(embed=em, ephemeral=True)
 
 
+async def investigate_die():
+    """어제 방어벽이 실패했으면 D10, 아니면 D5 (시트를 못 읽으면 기본값)"""
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    try:
+        return INVESTIGATE_DIE_FAILED if await asyncio.to_thread(store.prev_failed, today) else INVESTIGATE_DIE
+    except Exception:
+        return INVESTIGATE_DIE
+
+
 async def do_investigate(i):
     await i.response.defer(ephemeral=True)
-    roll = d(INVESTIGATE_DIE)
+    die = await investigate_die()
+    roll = d(die)
     try:
-        await asyncio.to_thread(store.infect, i.user.id, roll, f"조사 시작 D{INVESTIGATE_DIE} → {roll}")
+        await asyncio.to_thread(store.infect, i.user.id, roll, f"조사 시작 D{die} → {roll}")
     except StoreError as ex:
         return await private(i, str(ex))
     await i.channel.send(f"🔍 **{i.user.display_name}** 이(가) 조사를 시작한다.")
@@ -1144,10 +1167,11 @@ async def do_investigate_group(i, group):
     if not runners:
         return await private(i, f"{group}조 러너가 없습니다.")
     done, bad = [], []
+    die = await investigate_die()
     for x in runners:
-        roll = d(INVESTIGATE_DIE)
+        roll = d(die)
         try:
-            await asyncio.to_thread(store.infect, x["uid"], roll, f"조사 시작 D{INVESTIGATE_DIE} → {roll}")
+            await asyncio.to_thread(store.infect, x["uid"], roll, f"조사 시작 D{die} → {roll}")
             done.append(x["name"])
         except StoreError as ex:
             bad.append(f"{x['name']}({ex})")
