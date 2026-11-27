@@ -61,7 +61,7 @@ DEFAULT_ENEMY_HP = 50        # 백귀 기본 체력
 DEFAULT_ENEMY_DICE = 20      # 백귀 기본 공격 다이스
 FLEE_DIE, FLEE_NEED = 10, 7  # 도주: D10, 7 이상 성공
 JUDGE_DIE, JUDGE_NEED = 10, 7  # /판정: D10, 7 이상 성공
-MAX_RUNNERS = 4              # 한 전투에 참가할 수 있는 러너 수
+MAX_RUNNERS = 5              # 한 전투에 참가할 수 있는 러너 수
 PHASE_DELAY = 5              # 마지막 러너가 행동한 뒤 백귀가 반격하기까지 기다리는 시간(초)
 
 # --- 감염도 (유저에게 비공개) ---
@@ -1478,13 +1478,14 @@ async def cmd_investigate(i: discord.Interaction):
 @app_commands.describe(조="참가할 조 번호 (시트의 '조' 열)", 선공="조우=러너 선공 / 발각=백귀 선공",
                        백귀수="비우면 시트 '백귀' 탭을 사용, 숫자를 넣으면 기본 백귀를 그 수만큼 만듦",
                        체력="(백귀수 사용 시) 백귀 체력, 기본 50", 공격="(백귀수 사용 시) 백귀 공격 주사위 면수, 기본 20",
-                       러너1="직접 지정할 때 (조 대신)", 러너2="직접 지정", 러너3="직접 지정", 러너4="직접 지정")
+                       러너1="직접 지정할 때 (조 대신)", 러너2="직접 지정", 러너3="직접 지정", 러너4="직접 지정", 러너5="직접 지정")
 @app_commands.choices(선공=[app_commands.Choice(name="러너 선공 (조우)", value="러너"),
                             app_commands.Choice(name="백귀 선공 (발각)", value="백귀")])
 async def cmd_start(i: discord.Interaction, 조: int, 선공: str = "러너", 백귀수: int = 0, 체력: int = None, 공격: int = None,
                     러너1: discord.Member = None, 러너2: discord.Member = None,
-                    러너3: discord.Member = None, 러너4: discord.Member = None):
-    await do_start(i, 조, 선공, 백귀수, 체력, 공격, [m for m in (러너1, 러너2, 러너3, 러너4) if m])
+                    러너3: discord.Member = None, 러너4: discord.Member = None,
+                    러너5: discord.Member = None):
+    await do_start(i, 조, 선공, 백귀수, 체력, 공격, [m for m in (러너1, 러너2, 러너3, 러너4, 러너5) if m])
 
 
 @tree.command(name="체력조정", description="[총괄] 러너의 체력을 더하거나 뺍니다 (조사 중 피해 등). 시트에 바로 반영")
