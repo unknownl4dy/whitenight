@@ -1250,8 +1250,23 @@ async def do_start(i, group, first, enemy_count, hp, dice, picked):
     if len(chosen) > MAX_RUNNERS:
         return await private(i, f"러너가 {len(chosen)}명입니다. 전투는 최대 {MAX_RUNNERS}명까지라 `러너1`~`러너{MAX_RUNNERS}` 로 직접 지정해 주세요.")
     if enemy_count and enemy_count > 0:
-        enemies = [Enemy(f"백귀{n}", hp or DEFAULT_ENEMY_HP, hp or DEFAULT_ENEMY_HP, dice or DEFAULT_ENEMY_DICE)
-                   for n in range(1, enemy_count + 1)]
+        # 시트에 적힌 백귀 중에서 무작위로 뽑음: 이 조로 지정된 백귀 먼저, 모자라면 조가 빈 백귀, 그래도 모자라면 기본 백귀
+        mine = [x for x in erows if group and x["group"] == group]
+        free = [x for x in erows if x["group"] is None] if group else [x for x in erows]   # 조 없이 시작하면 시트 전체에서 무작위
+        random.shuffle(mine); random.shuffle(free)
+        pool = (mine + free)[:enemy_count]
+        enemies = []
+        for x in pool:
+            h = hp or x["hp"]
+            enemies.append(Enemy(x["name"], h, h, dice or x["dice"]))
+        for n in range(len(enemies) + 1, enemy_count + 1):
+            enemies.append(Enemy(f"백귀{n}", hp or DEFAULT_ENEMY_HP, hp or DEFAULT_ENEMY_HP, dice or DEFAULT_ENEMY_DICE))
+        names = [e.name for e in enemies]                      # 이름이 겹치면 번호를 붙여 구분
+        seen = {}
+        for e in enemies:
+            if names.count(e.name) > 1:
+                seen[e.name] = seen.get(e.name, 0) + 1
+                e.name = f"{e.name}{seen[e.name]}"
     else:
         src = [x for x in erows if x["group"] in (None, group)] if group else erows
         if not src:
