@@ -377,13 +377,24 @@ def barrier_status(wb, date):
 
 
 def prev_barrier_failed(wb, today):
-    """전날(한국 시간) 방어벽이 실패였는지: 전날 웨이브 줄이 있고 방어벽 수가 필요한 백귀 수보다 적으면 True"""
-    y = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-    try:
-        st = barrier_status(wb, y)
-    except StoreError:
-        return False
-    return st["built"] < st["required"]
+    """가장 최근(오늘 이전) 방어벽 기록이 실패였는지 (실패 여부, 사유 설명).
+    '방어벽' 탭에서 오늘보다 이전 날짜 중 가장 늦은 줄을 보고, 방어벽수 < 필요한백귀수 이면 실패.
+    어제 방어벽을 안 만든 날(기록 줄이 없는 날)이 끼어 있어도 그 이전의 마지막 기록을 기준으로 함"""
+    bs = find_tab(wb, "방어벽")
+    if bs is None:
+        return False, "방어벽 탭이 없음"
+    best = None
+    for row in bs.iter_rows(min_row=2, values_only=True):
+        if not row or _txt(row[0]) == "":
+            continue
+        dt = date_text(row[0])
+        if dt < today and (best is None or dt > best[0]):
+            best = (dt, _int(row[1] if len(row) > 1 else 0, 0), _int(row[2] if len(row) > 2 else 0, 0))
+    if best is None:
+        return False, "오늘 이전의 방어벽 기록이 없음"
+    dt, built, required = best
+    failed = built < required
+    return failed, f"최근 방어벽 기록({dt}) {built}/{required} → {'실패' if failed else '성공'}"
 
 
 def parse_runners(wb):
@@ -1141,20 +1152,22 @@ async def do_info(i):
 
 
 async def investigate_die():
-    """어제 방어벽이 실패했으면 D10, 아니면 D5 (시트를 못 읽으면 기본값)"""
+    """어제 방어벽이 실패했으면 D10, 아니면 D5 → (주사위 면수, 사유). 사유는 감염기록 사유 칸에 남음"""
     today = datetime.now(KST).strftime("%Y-%m-%d")
     try:
-        return INVESTIGATE_DIE_FAILED if await asyncio.to_thread(store.prev_failed, today) else INVESTIGATE_DIE
-    except Exception:
-        return INVESTIGATE_DIE
+        failed, why = await asyncio.to_thread(store.prev_failed, today)
+    except Exception as e:
+        failed, why = False, f"전날 방어벽 확인 오류: {e}"
+    print("조사 주사위:", why)
+    return (INVESTIGATE_DIE_FAILED if failed else INVESTIGATE_DIE), why
 
 
 async def do_investigate(i):
     await i.response.defer(ephemeral=True)
-    die = await investigate_die()
+    die, why = await investigate_die()
     roll = d(die)
     try:
-        await asyncio.to_thread(store.infect, i.user.id, roll, f"조사 시작 D{die} → {roll}")
+        await asyncio.to_thread(store.infect, i.user.id, roll, f"조사 시작 D{die} → {roll} ({why})")
     except StoreError as ex:
         return await private(i, str(ex))
     await i.channel.send(f"🔍 **{i.user.display_name}** 이(가) 조사를 시작한다.")
@@ -1167,11 +1180,11 @@ async def do_investigate_group(i, group):
     if not runners:
         return await private(i, f"{group}조 러너가 없습니다.")
     done, bad = [], []
-    die = await investigate_die()
+    die, why = await investigate_die()
     for x in runners:
         roll = d(die)
         try:
-            await asyncio.to_thread(store.infect, x["uid"], roll, f"조사 시작 D{die} → {roll}")
+            await asyncio.to_thread(store.infect, x["uid"], roll, f"조사 시작 D{die} → {roll} ({why})")
             done.append(x["name"])
         except StoreError as ex:
             bad.append(f"{x['name']}({ex})")
